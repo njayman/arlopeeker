@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/getlantern/systray"
-	"github.com/sqweek/dialog"
 )
 
 type Config struct {
@@ -32,7 +32,7 @@ func getConfigPath() string {
 	case "darwin":
 		configDir = filepath.Join(os.Getenv("HOME"), "Library", "Application Support")
 	default:
-		configDir = filepath.Join(os.Getenv("Home"), ".config")
+		configDir = filepath.Join(os.Getenv("HOME"), ".config")
 	}
 
 	appDir := filepath.Join(configDir, "arlopeeker")
@@ -44,24 +44,13 @@ func getConfigPath() string {
 //go:embed assets/icon.png
 var assetsFS embed.FS
 
-var mainThreadCh = make(chan func())
-
-func callOnMainThread(f func()) {
-	done := make(chan struct{})
-	mainThreadCh <- func() {
-		f()
-		close(done)
-	}
-	<-done
-}
-
 func loadConfig() {
 	configPath = getConfigPath()
 	configFile, err := os.Open(configPath)
 
 	if err != nil {
 		config = Config{
-			Image:    "assets/icon.png",
+			Image:    "assets/photo.png",
 			Duration: 3,
 			Speed:    1.5,
 		}
@@ -76,7 +65,7 @@ func loadConfig() {
 	if err := decoder.Decode(&config); err != nil {
 		log.Printf("Failed to parse config.json: %v. Using default config.\n", err)
 		config = Config{
-			Image:    "assets/icon.png",
+			Image:    "assets/photo.png",
 			Duration: 3,
 			Speed:    1.5,
 		}
@@ -122,30 +111,15 @@ func onReady() {
 			select {
 			case <-mShow.ClickedCh:
 				go ShowPeeker(config.Image, time.Duration(config.Duration*float64(time.Second)), float32(config.Speed))
+			case <-mSetting.ClickedCh:
+				uiActions <- func() {
+					ShowSettingsWindow()
+				}
+				// fmt.Println("Settings")
+
 			case <-mQuit.ClickedCh:
 				systray.Quit()
-				return
 			}
-		}
-	}()
-
-	go func() {
-		for {
-			<-mSetting.ClickedCh
-			callOnMainThread(func() {
-
-				imagePath, err := dialog.File().
-					Filter("Image Files", "png", "jpg", "jpeg").
-					Title("Select Pet Image").
-					Load()
-
-				if err == nil && imagePath != "" {
-					config.Image = imagePath
-					saveConfig()
-				} else if err != nil {
-					log.Println("Image selection canceled or failed:", err)
-				}
-			})
 		}
 	}()
 }
@@ -158,14 +132,55 @@ func onExit() {
 
 }
 
+var uiActions = make(chan func())
+
 func main() {
+	runtime.LockOSThread()
+
+	flagSettings := flag.Bool("settings", false, "Open settings window")
+	cliMode := flag.Bool("peek", false, "Trigger peek image once and exit")
+	image := flag.String("image", "", "Path to image to peek (optional)")
+	duration := flag.Float64("duration", 0, "Duration in seconds (optional)")
+	speed := flag.Float64("speed", 0, "Speed factor (optional)")
+
+	flag.Parse()
+
 	loadConfig()
 
-	go func() {
-		for f := range mainThreadCh {
-			f()
+	if *cliMode {
+		img := config.Image
+
+		if *image != "" {
+			img = *image
 		}
+
+		dur := time.Duration(config.Duration * float64(time.Second))
+
+		if *duration > 0 {
+			dur = time.Duration(*duration * float64(time.Second))
+		}
+
+		spd := float32(config.Speed)
+
+		if *speed > 0 {
+			spd = float32(*speed)
+		}
+
+		if *flagSettings {
+			ShowSettingsWindow()
+			return
+		}
+
+		ShowPeeker(img, dur, spd)
+
+		os.Exit(0)
+	}
+
+	go func() {
+		systray.Run(onReady, onExit)
 	}()
 
-	systray.Run(onReady, onExit)
+	for action := range uiActions {
+		action()
+	}
 }
